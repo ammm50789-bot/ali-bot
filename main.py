@@ -4,6 +4,9 @@ import time
 import random
 import aiohttp
 import aiosqlite
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -13,13 +16,14 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ContextTypes,
+    Application,
 )
 
 # ==========================================
-# ⚙️ CONFIGURATION
+# ⚙️ CONFIGURATION (Hardcoded as requested)
 # ==========================================
-TELEGRAM_BOT_TOKEN = "8730185611:AAG3H6UE1n9c-FPyA9XB5FRcOW0-ac-uxVc" 
-ADMIN_ID = 8730185611 # APNI ID DALEIN
+TELEGRAM_BOT_TOKEN = "8730185611:AAG3H6UE1n9c-FPyA9XB5FRcOW0-ac-uxVc"
+ADMIN_ID = 8195946863
 ADMIN_PASSWORD = "11223344Ali"
 
 API_URL = 'https://api.bdg88zf.com/api/webapi/GetGameIssue'
@@ -34,22 +38,46 @@ logger = logging.getLogger(__name__)
 
 is_global_running = False
 automation_task = None
-user_states = {} # Track what user/admin is doing
+user_states = {}
 
-# ==========================================
-# 💾 ASYNC DATABASE (Crash-Free)
-# ==========================================
 DB_NAME = "bot_database.db"
 
+# ==========================================
+# 🌐 DUMMY WEB SERVER (RAILWAY CRASH FIX)
+# ==========================================
+# Railway kills apps that don't bind to a port. This keeps it alive.
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive and running on Railway!")
+    def log_message(self, format, *args):
+        pass # Disable logging for healthchecks
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), DummyHandler)
+    server.serve_forever()
+
+def keep_alive():
+    t = threading.Thread(target=run_dummy_server)
+    t.daemon = True
+    t.start()
+
+# ==========================================
+# 💾 ASYNC DATABASE
+# ==========================================
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, period TEXT, size TEXT, nums TEXT, result_size TEXT, win_loss TEXT, status TEXT)")
         await db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-        # Users table statuses: NEW, PENDING (Sent UID), ACTIVE (Approved), BLOCKED
         await db.execute("CREATE TABLE IF NOT EXISTS users (uid INTEGER PRIMARY KEY, game_uid TEXT, status TEXT DEFAULT 'NEW', joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-        # Channels table (for users)
         await db.execute("CREATE TABLE IF NOT EXISTS channels (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_uid INTEGER, channel_id TEXT, is_running INTEGER DEFAULT 0)")
         await db.commit()
+
+async def post_init(application: Application):
+    """Sync DB init with Telegram Event Loop to prevent crashes"""
+    await init_db()
 
 async def get_setting(key):
     async with aiosqlite.connect(DB_NAME) as db:
@@ -88,18 +116,14 @@ async def get_wingo_data():
     return period_str, ist_now.second
 
 async def get_next_prediction():
-    """Trend: Pichla BIG tou agla BIG. Sath 2 Numbers"""
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT result_size FROM history WHERE status='DONE' ORDER BY id DESC LIMIT 1") as cursor:
             row = await cursor.fetchone()
-    
     pred_size = row[0] if (row and row[0]) else "BIG"
-    
     if pred_size == "BIG":
         nums = random.sample([5, 6, 7, 8, 9], 2)
     else:
         nums = random.sample([0, 1, 2, 3, 4], 2)
-        
     return pred_size, f"{nums[0]}, {nums[1]}"
 
 # ==========================================
@@ -107,9 +131,13 @@ async def get_next_prediction():
 # ==========================================
 async def broadcast_to_channels(bot, text, sticker=None):
     channels = await get_active_channels()
-    for ch in set(channels + [str(ADMIN_ID)]): # Also send to Admin DM
+    for ch in set(channels + [str(ADMIN_ID)]):
         try:
-            if sticker: await bot.send_sticker(chat_id=ch, sticker=sticker)
+            if sticker: 
+                try:
+                    await bot.send_sticker(chat_id=ch, sticker=sticker)
+                except:
+                    pass
             await bot.send_message(chat_id=ch, text=text, parse_mode="HTML", disable_web_page_preview=True)
         except Exception as e:
             logger.error(f"Failed to send to {ch}: {e}")
@@ -127,7 +155,6 @@ async def automation_worker(bot):
                 continue
 
             if current_period and current_period != last_predicted_period:
-                # 1. GENERATE
                 p_size, p_nums = await get_next_prediction()
                 last_predicted_period = current_period
                 
@@ -135,7 +162,6 @@ async def automation_worker(bot):
                     await db.execute("INSERT INTO history (period, size, nums, status) VALUES (?, ?, ?, 'WAITING')", (current_period, p_size, p_nums))
                     await db.commit()
                 
-                # Fetch Links
                 g_link = await get_setting("GAME_LINK") or "Not Set"
                 b_link = await get_setting("BOT_LINK") or "Not Set"
                 c_link = await get_setting("ADMIN_CHANNEL_LINK") or "Not Set"
@@ -151,13 +177,12 @@ async def automation_worker(bot):
                        f"🤖 <b>Bot Link:</b> {b_link}\n"
                        f"📢 <b>Join Channel:</b> {c_link}")
                 
-                await broadcast_to_channels(bot, msg, await get_setting("START_STICKER"))
+                start_stk = await get_setting("START_STICKER")
+                await broadcast_to_channels(bot, msg, start_stk)
                 
-                # 2. WAIT FOR RESULT
                 await asyncio.sleep(55 - seconds)
                 
-                # 3. RESULT PROCESS
-                actual_size = random.choice(["BIG", "SMALL"]) # Simulation
+                actual_size = random.choice(["BIG", "SMALL"])
                 is_win = (p_size == actual_size)
                 win_loss = "WIN" if is_win else "LOSS"
                 
@@ -171,8 +196,10 @@ async def automation_worker(bot):
                            f"<b>🎲 RESULT:</b> {actual_size}\n\n"
                            f"<b>STATUS: {win_loss}</b>")
 
-                sticker = await get_setting("WIN_STICKER") if is_win else await get_setting("LOSS_STICKER")
-                await broadcast_to_channels(bot, res_msg, sticker)
+                win_stk = await get_setting("WIN_STICKER")
+                loss_stk = await get_setting("LOSS_STICKER")
+                final_stk = win_stk if is_win else loss_stk
+                await broadcast_to_channels(bot, res_msg, final_stk)
 
         except Exception as e:
             logger.error(f"Loop Error: {e}")
@@ -197,7 +224,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if status == 'BLOCKED':
         await update.message.reply_text("⛔ You are blocked by Admin.")
-        return
     elif status == 'NEW' or status == 'PENDING':
         g_link = await get_setting("GAME_LINK") or "Contact Admin"
         msg = (f"👋 <b>Welcome to Ali Prediction VIP</b>\n\n"
@@ -237,7 +263,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    # --- ADMIN BUTTONS ---
     if uid == ADMIN_ID:
         if data == "adm_main":
             await query.edit_message_text("⚙️ <b>ADMIN PANEL</b>", reply_markup=admin_main_kb(), parse_mode="HTML")
@@ -302,7 +327,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_states[uid] = "WAITING_BROADCAST"
             await query.edit_message_text("📢 Send the message/image you want to broadcast to all users:")
 
-    # --- USER BUTTONS ---
     else:
         if data == "user_add_channel":
             user_states[uid] = "WAITING_USER_CHANNEL"
@@ -323,7 +347,6 @@ async def text_sticker_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     state = user_states.get(uid)
     if not state: return
 
-    # ADMIN STATES
     if uid == ADMIN_ID:
         if state == "WAITING_ADMIN_PASSWORD":
             if update.message.text == ADMIN_PASSWORD:
@@ -358,7 +381,6 @@ async def text_sticker_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 except: pass
             await update.message.reply_text(f"✅ Broadcast sent to {count} active users.", reply_markup=admin_main_kb())
 
-    # NORMAL USER STATES
     else:
         if state == "WAITING_FOR_UID":
             game_uid = update.message.text
@@ -381,19 +403,19 @@ async def text_sticker_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # 🚀 MAIN RUNNER
 # ==========================================
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Ensures DB creates cleanly on startup
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(init_db())
+    # START DUMMY SERVER FOR RAILWAY
+    keep_alive()
 
+    # BUILD APP (PTB v20)
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.ALL, text_sticker_handler))
     
-    logger.info("Bot is Running on Async Engine (Crash-Free).")
-    app.run_polling()
+    logger.info("Bot is Running! Background Railway Server is ACTIVE.")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
