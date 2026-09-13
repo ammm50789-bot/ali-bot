@@ -19,7 +19,7 @@ from telegram.ext import (
 # ⚙️ CONFIGURATION
 # ==========================================
 TELEGRAM_BOT_TOKEN = "8730185611:AAG3H6UE1n9c-FPyA9XB5FRcOW0-ac-uxVc" 
-ADMIN_ID = 8195946863 # APNI ID DALEIN
+ADMIN_ID = 8730185611 # APNI ID DALEIN
 ADMIN_PASSWORD = "11223344Ali"
 
 API_URL = 'https://api.bdg88zf.com/api/webapi/GetGameIssue'
