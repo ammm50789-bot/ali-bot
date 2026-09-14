@@ -20,8 +20,8 @@ from telegram.ext import (
 # ==========================================
 # ⚙️ VIP CONFIGURATION
 # ==========================================
-TELEGRAM_BOT_TOKEN = "8730185611:AAG3H6UE1n9c-FPyA9XB5FRcOW0-ac-uxVc"
-ADMIN_ID = 8195946863
+TELEGRAM_BOT_TOKEN = "8852918890:AAFprTv99vIe1gYfLdeVeh2LY27GJ0Fdy70"
+ADMIN_ID = 8199268824
 ADMIN_PASSWORD = "11223344Ali"
 
 API_URL = 'https://api.bdg88zf.com/api/webapi/GetGameIssue'
