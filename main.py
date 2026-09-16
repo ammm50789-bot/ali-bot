@@ -20,7 +20,7 @@ from telegram.ext import (
 # ==========================================
 # âš™ï¸ VIP CONFIGURATION
 # ==========================================
-TELEGRAM_BOT_TOKEN = "8675974676:AAG9MlrlEgJSPwcxg_-khjCSl4cQxI-N9LI"
+TELEGRAM_BOT_TOKEN = "8730185611:AAG3H6UE1n9c-FPyA9XB5FRcOW0-ac-uxVc"
 ADMIN_ID = 8195946863
 ADMIN_PASSWORD = "11223344Ali"
 
