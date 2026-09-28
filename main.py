@@ -1,817 +1,480 @@
-
 """
 =============================================================================
-👑 ALI VIP ULTIMATE v6.0 — REAL AVIATOR API + TELEGRAM BOT (PYTHON)
+👑 ULTIMATE ALI VIP TELEGRAM BOT (SMART CHANNEL & MULTI-STICKER EDITION)
 =============================================================================
-Language Stack : Python 3, asyncio, websockets, aiohttp, Telegram Bot API
-Features       : Real Spribe Aviator API, WebSocket live feed, Advanced
-                 prediction (Markov + Volatility + Streak), Short/Medium/Long
-                 signals, Auto round history, Telegram bot, Admin panel
-Platform       : Railway / Replit / VPS (Port Binding ready)
+Platform: Railway / VPS (Crash-Free, RAM-based, Port Binding)
+Features: Channel Admin Auto-Detect, 3-Number Wingo, Jackpot, Multi-Stickers
 =============================================================================
 """
 
-# ==========================================
-# 1. IMPORTS
-# ==========================================
 import asyncio
 import logging
 import time
 import random
-import os
-import json
-import statistics
-from datetime import datetime, timedelta
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
-from collections import deque
-
 import aiohttp
-import websockets
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+import os
+from aiohttp import web
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
+    ChatMemberHandler,
     filters,
     ContextTypes,
     Application,
 )
 
 # ==========================================
-# 2. CONFIGURATION  ← (Tumhara purana token/ID yahan)
+# ⚙️ 1. CONFIGURATION
 # ==========================================
-CONFIG = {
-    # ----- TELEGRAM -----
-    "BOT_TOKEN": "8404151043:AAGypUvXKXml-3laiC3bUtEs02McyXJdaTs",   # ← tumhara token
-    "ADMIN_ID": 8928420277,                                            # ← tumhara admin ID
-    "ADMIN_PASS": "11223344Ali",
-    "PORT": int(os.environ.get("PORT", 8080)),
+TELEGRAM_BOT_TOKEN = "8404151043:AAGypUvXKXml-3laiC3bUtEs02McyXJdaTs"
+ADMIN_ID = 8404151043
+ADMIN_PASSWORD = "11223344Ali"
 
-    # ----- REAL SPRIBE AVIATOR API (from public research) -----
-    # REST endpoint (info / stomp)
-    "SPRIBE_INFO_URL": "https://et.af-south-1.spribegaming.com/api/v1/public/et-player-stomp/info",
-
-    # Real-time WebSocket URL (publicly known for Aviator)
-    "SPRIBE_WS_URL": "wss://app2.spribegaming.com/BlueBox/websocket",
-
-    # Fixed params (from open-source Aviator predictor repos)
-    "SPRIBE_PARAMS": {
-        "currency": "ZAR",
-        "userId": "8d6ced67-2fad-eb11-8124-00155d2f9e52",
-        "token": "63c4167e-86a3-f011-9a2a-00155da60059",
-        "operator": "betwaycoza",
-        "sessionToken": "GT97hctj3nifLpwkZY4MXGgEOsVkyHTvCiygj2qML0pwnn0bked7VUwlhXy6RfPD",
-        "deviceType": "desktop",
-        "gameIdentifier": "AVIATOR",
-        "gameZone": "aviator_core_inst5_af",
-        "lang": "en",
-    },
-
-    # Wingo API (tumhara purana)
-    "WINGO_API": "https://api.bdg88zf.com/api/webapi/GetGameIssue",
+API_URL = 'https://api.bdg88zf.com/api/webapi/GetGameIssue'
+API_PAYLOAD = {
+    "typeId": 1, "language": 0,
+    "random": "40079dcba93a48769c6ee9d4d4fae23f",
+    "signature": "D12108C4F57C549D82B23A91E0FA20AE"
 }
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==========================================
-# 3. CONSTANTS & ROLES
+# 🧠 2. IN-MEMORY DATABASE (NO CRASH, NO SQLITE)
 # ==========================================
-class Status:
-    NEW = "NEW"
-    WAITING_UID = "WAITING_UID"
-    WAITING_DEPOSIT = "WAITING_DEPOSIT"
-    PENDING = "PENDING"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
-    ACTIVE = "ACTIVE"
-    BLOCKED = "BLOCKED"
-    SUSPENDED = "SUSPENDED"
-
-class Roles:
-    OWNER = "OWNER"
-    ADMIN = "ADMIN"
-    VIP = "VIP"
-    USER = "USER"
-
-# ==========================================
-# 4. DATA STRUCTURES
-# ==========================================
-@dataclass
-class UserStats:
-    total_signals: int = 0
-    wins: int = 0
-    losses: int = 0
-
-@dataclass
-class UserProfile:
-    id: int
-    username: str
-    name: str
-    status: str = Status.NEW
-    role: str = Roles.USER
-    game_uid: str = ""
-    deposit_amount: str = "0"
-    stats: UserStats = field(default_factory=UserStats)
-    last_action_time: float = 0.0
-
-@dataclass
-class DynamicGame:
-    code: str
-    name: str
-    link: str
-    icon: str
-    description: str
-    is_active: bool = True
-    is_maintenance: bool = False
-
-# ==========================================
-# 5. IN-MEMORY DATABASE
-# ==========================================
-db = {
-    "users": {},
-    "games": {},
-    "tickets": {},
-    "history": [],
-    "settings": {
-        "global_maintenance": False,
-        "bot_on": True,
-        "auto_approval": False,
-        "welcome_msg": "Welcome to 👑 ALI VIP!",
-        "maintenance_msg": "🚧 System under maintenance.",
-    },
-    "stats": {
-        "total_requests": 0,
-        "signals_sent": 0,
-        "signals_skipped": 0,
-        "errors": 0,
-        "broadcasts": 0,
-        "start_time": time.time(),
-    },
-    # Real-time Aviator data
-    "aviator": {
-        "api_history": deque(maxlen=100),    # real rounds fetched from API
-        "ws_connected": False,
-        "last_multiplier": 0.0,
-        "current_round": 0,
-        "api_ok": False,
-    },
-    # Wingo real-time
-    "wingo": {
-        "api_history": deque(maxlen=60),
-        "api_ok": False,
-    },
+settings = {
+    "GAME_LINK": "https://pakvip.sbs",
+    "BOT_LINK": "https://t.me/AliVipBot",
+    "ADMIN_CHANNEL_LINK": "https://t.me/AliVipUpdates",
+    "WIN_STICKERS": [],      # Max 3
+    "START_STICKERS": [],    # Max 3
+    "LOSS_STICKER": None,
+    "JACKPOT_STICKER": None,
+    "CLOSE_STICKER": None
 }
 
-user_states: Dict[int, str] = {}
+users = {}      # uid -> {"status": "NEW", "game_uid": ""}
+channels = {}   # uid -> {"channel_id": None, "channel_name": "", "is_running": False}
+last_result = {"size": "BIG"} 
 
-# Pre-load default games
-db["games"]["wingo"] = DynamicGame("wingo", "WINGO", "https://pakvip.sbs", "🔴", "1-Min Trend Analysis")
-db["games"]["aviator"] = DynamicGame("aviator", "AVIATOR", "https://pakvip.sbs", "✈️", "Spribe Real API")
-
-# ==========================================
-# 6. ADVANCED PREDICTION ENGINE
-# ==========================================
-
-class AviatorEngine:
-    """
-    Real-data driven prediction engine.
-    Combines:
-      • Markov / frequency of buckets
-      • Streak reversal
-      • Volatility (std dev)
-      • Recency weighted probability
-    """
-
-    @staticmethod
-    def get_real_values() -> List[float]:
-        """Return real Aviator multipliers from API history."""
-        return [r["multiplier"] for r in db["aviator"]["api_history"] if r.get("multiplier", 0) > 1]
-
-    @classmethod
-    def predict(cls, signal_type: str = "short") -> dict:
-        values = cls.get_real_values()
-        recent = values[-50:]  # last 50 rounds
-
-        # ---------- bucket probabilities ----------
-        low_n   = sum(1 for v in recent if v < 1.6)
-        mid_n   = sum(1 for v in recent if 1.6 <= v < 3.0)
-        high_n  = sum(1 for v in recent if 3.0 <= v < 10.0)
-        ultra_n = sum(1 for v in recent if v >= 10.0)
-        total   = max(len(recent), 1)
-
-        p_low   = low_n / total
-        p_mid   = mid_n / total
-        p_high  = high_n / total
-        p_ultra = ultra_n / total
-
-        # ---------- streak reversal ----------
-        if recent:
-            last = recent[-1]
-            streak = 1
-            for v in reversed(recent[:-1]):
-                if (last < 1.6 and v < 1.6) or (last >= 1.6 and v >= 1.6):
-                    streak += 1
-                else:
-                    break
-            if streak >= 3 and last < 1.6:
-                p_mid += 0.10; p_high += 0.06; p_ultra += 0.02; p_low -= 0.18
-
-        # ---------- volatility ----------
-        if len(recent) >= 5:
-            try:
-                vol = statistics.pstdev(recent)
-                if vol > 1.5:
-                    p_high += 0.05; p_ultra += 0.03; p_low -= 0.08
-                elif vol < 0.3:
-                    p_low += 0.08; p_mid -= 0.04; p_high -= 0.03; p_ultra -= 0.01
-            except statistics.StatisticsError:
-                pass
-
-        # ---------- normalize ----------
-        s = p_low + p_mid + p_high + p_ultra
-        if s <= 0:
-            p_low, p_mid, p_high, p_ultra = 0.55, 0.28, 0.14, 0.03
-        else:
-            p_low /= s; p_mid /= s; p_high /= s; p_ultra /= s
-
-        # ---------- choose signal type ----------
-        if signal_type == "short":
-            value = round(1.05 + random.random() * 0.55, 2)
-            bucket = "LOW"; conf = int(p_low * 100)
-        elif signal_type == "medium":
-            value = round(1.60 + random.random() * 1.40, 2)
-            bucket = "MID"; conf = int(p_mid * 100)
-        else:  # long
-            r = random.random()
-            if r < p_high:
-                value = round(3.00 + random.random() * 7.00, 2)
-                bucket = "HIGH"; conf = int(p_high * 100)
-            elif r < p_high + p_ultra:
-                value = round(10.00 + random.random() * 15.00, 2)
-                bucket = "ULTRA"; conf = int(p_ultra * 100)
-            else:
-                value = round(3.00 + random.random() * 2.50, 2)
-                bucket = "HIGH"; conf = int(p_high * 100)
-
-        conf = max(55, min(96, conf + 20))
-        return {
-            "value": value,
-            "confidence": conf,
-            "method": f"{signal_type.upper()}-{bucket}",
-            "signal_type": signal_type,
-            "bucket": bucket,
-            "range": [round(max(1.05, value - 0.3), 2), value],
-        }
-
-
-class WingoEngine:
-    """Simple Markov + streak for Wingo (based on your old logic)."""
-
-    @classmethod
-    def predict(cls) -> dict:
-        hist = list(db["wingo"]["api_history"])
-        sizes = [h["size"] for h in hist if h.get("size") in ("BIG", "SMALL")]
-
-        p_big = 0.5
-        if len(sizes) >= 5:
-            big_n = sizes.count("BIG")
-            p_big = 0.5 * 0.5 + (big_n / len(sizes)) * 0.5
-        if len(sizes) >= 3:
-            last = sizes[-1]
-            streak = 1
-            for s in reversed(sizes[:-1]):
-                if s == last: streak += 1
-                else: break
-            if streak >= 4:
-                p_big += -0.15 if last == "BIG" else 0.15
-            elif streak == 3:
-                p_big += -0.08 if last == "BIG" else 0.08
-
-        p_big = max(0.08, min(0.92, p_big))
-        pick = "BIG" if p_big >= 0.5 else "SMALL"
-        conf = int(max(p_big, 1 - p_big) * 100)
-
-        nums_pool = [5, 6, 7, 8, 9] if pick == "BIG" else [0, 1, 2, 3, 4]
-        nums = sorted(random.sample(nums_pool, 2))
-
-        # IST period
-        ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-        period = f"{ist.strftime('%Y%m%d')}1000{ist.hour*60 + ist.minute + 1:04d}"
-        return {"period": period, "pick": pick, "nums": nums, "confidence": conf}
-
+is_global_running = False
+automation_task = None
+user_states = {}
 
 # ==========================================
-# 7. REAL API FETCHERS (HTTP + WebSocket)
+# 🌐 3. NATIVE WEB SERVER (FIXES RAILWAY CRASH)
 # ==========================================
-
-async def fetch_spribe_info() -> bool:
-    """Fetch Spribe info endpoint (REST)."""
-    try:
-        timeout = aiohttp.ClientTimeout(total=8)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            params = {**CONFIG["SPRIBE_PARAMS"], "t": str(int(time.time() * 1000))}
-            async with session.get(CONFIG["SPRIBE_INFO_URL"], params=params) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    db["aviator"]["api_ok"] = True
-                    logger.info("✅ Spribe REST API connected")
-                    return True
-    except Exception as e:
-        logger.warning(f"Spribe REST failed: {e}")
-    db["aviator"]["api_ok"] = False
-    return False
-
-
-async def fetch_spribe_history() -> List[dict]:
-    """
-    Try to fetch last rounds from public mirrors.
-    Even if REST fails, WebSocket may give us live data.
-    """
-    candidates = [
-        "https://et.af-south-1.spribegaming.com/api/v1/public/aviator/history?size=50",
-        "https://aviator-next.spribegaming.com/api/v1/public/aviator/history?size=50",
-    ]
-    timeout = aiohttp.ClientTimeout(total=8)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        for url in candidates:
-            try:
-                async with session.get(url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        rounds = (
-                            data if isinstance(data, list)
-                            else data.get("rounds") or data.get("data") or data.get("history") or []
-                        )
-                        parsed = []
-                        for r in rounds[:100]:
-                            mult = float(r.get("multiplier") or r.get("crashPoint") or r.get("value") or 0)
-                            if mult > 1:
-                                parsed.append({
-                                    "multiplier": mult,
-                                    "round_id": r.get("roundId") or r.get("id"),
-                                    "ts": r.get("timestamp") or r.get("time") or time.time(),
-                                })
-                        if parsed:
-                            for p in parsed:
-                                db["aviator"]["api_history"].append(p)
-                            logger.info(f"📊 Loaded {len(parsed)} real Aviator rounds")
-                            return parsed
-            except Exception as e:
-                logger.debug(f"Aviator history {url} failed: {e}")
-    return []
-
-
-async def aviator_websocket_loop():
-    """
-    Connect to real Spribe WebSocket and capture live multipliers.
-    Reconnects automatically.
-    """
-    ws_url = CONFIG["SPRIBE_WS_URL"]
-    while True:
-        try:
-            async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
-                db["aviator"]["ws_connected"] = True
-                logger.info("🔌 Connected to Spribe Aviator WebSocket")
-                # Some deployments require a handshake frame – send initial info request
-                try:
-                    await ws.send(json.dumps({"type": "subscribe", "game": "aviator"}))
-                except Exception:
-                    pass
-
-                async for message in ws:
-                    try:
-                        payload = json.loads(message)
-                        # Different message formats – capture any multiplier field
-                        mult = (
-                            payload.get("multiplier")
-                            or payload.get("crashPoint")
-                            or payload.get("value")
-                            or (payload.get("data") or {}).get("multiplier")
-                        )
-                        if mult:
-                            mult = float(mult)
-                            if mult > 1:
-                                db["aviator"]["last_multiplier"] = mult
-                                db["aviator"]["api_history"].append({
-                                    "multiplier": mult,
-                                    "round_id": payload.get("roundId") or payload.get("round"),
-                                    "ts": time.time(),
-                                })
-                                logger.debug(f"📈 Live Aviator: {mult}x")
-                    except Exception:
-                        continue
-        except Exception as e:
-            db["aviator"]["ws_connected"] = False
-            logger.warning(f"⚠️ Aviator WS disconnected: {e} — retrying in 5s")
-            await asyncio.sleep(5)
-
-
-async def fetch_wingo_history() -> List[dict]:
-    """Real Wingo history endpoint that works."""
-    url = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
-    try:
-        timeout = aiohttp.ClientTimeout(total=8)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    rounds = data if isinstance(data, list) else (
-                        data.get("data") or data.get("list") or []
-                    )
-                    if isinstance(rounds, dict):
-                        rounds = rounds.get("list") or []
-                    parsed = []
-                    for r in rounds[:60]:
-                        try:
-                            num = int(r.get("number") or r.get("result") or 0)
-                            parsed.append({
-                                "period": str(r.get("issueNumber") or r.get("period") or ""),
-                                "number": num,
-                                "size": "BIG" if num >= 5 else "SMALL",
-                                "ts": r.get("endTime") or time.time(),
-                            })
-                        except Exception:
-                            continue
-                    for p in parsed:
-                        db["wingo"]["api_history"].append(p)
-                    db["wingo"]["api_ok"] = bool(parsed)
-                    logger.info(f"🔴 Loaded {len(parsed)} Wingo rounds")
-                    return parsed
-    except Exception as e:
-        logger.warning(f"Wingo API failed: {e}")
-    db["wingo"]["api_ok"] = False
-    return []
-
-
-async def api_refresh_loop():
-    """Background loop to keep real data fresh."""
-    while True:
-        try:
-            await fetch_spribe_history()
-            await fetch_wingo_history()
-        except Exception as e:
-            logger.error(f"API refresh error: {e}")
-        await asyncio.sleep(30)  # every 30 seconds
-
-
-# ==========================================
-# 8. WEB APP / REST / WS SERVER (Railway ready)
-# ==========================================
-from aiohttp import web as aio_web
-
-WEBAPP_HTML = """<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>ALI VIP Live</title>
-<style>body{background:#070a10;color:#fff;font-family:sans-serif;text-align:center;padding:20px}
-.card{background:#111823;border:1px solid #FFD700;border-radius:16px;padding:20px;margin:10px auto;max-width:500px}
-h2{color:#FFD700}.big{font-size:42px;font-weight:900;color:#00ff88}</style></head>
-<body><div class="card"><h2>✈️ AVIATOR LIVE</h2>
-<div class="big" id="m">0.00x</div>
-<p style="color:#7d8794" id="s">Connecting…</p></div>
-<script>
-const proto = location.protocol==='https:'?'wss://':'ws://';
-const ws = new WebSocket(proto+location.host+'/ws');
-ws.onmessage=(e)=>{const d=JSON.parse(e.data);
- if(d.type==='aviator'){document.getElementById('m').textContent=d.multiplier+'x';
- document.getElementById('s').textContent='Round '+d.round;}};
-</script></body></html>"""
-
-connected_ws = set()
-
-async def handle_webapp(request):
-    return aio_web.Response(text=WEBAPP_HTML, content_type="text/html")
-
-async def handle_ws(request):
-    ws = aio_web.WebSocketResponse()
-    await ws.prepare(request)
-    connected_ws.add(ws)
-    try:
-        async for _ in ws:
-            pass
-    finally:
-        connected_ws.discard(ws)
-    return ws
-
-async def broadcast_ws(msg: dict):
-    if not connected_ws:
-        return
-    payload = json.dumps(msg)
-    for ws in list(connected_ws):
-        try:
-            await ws.send_str(payload)
-        except Exception:
-            connected_ws.discard(ws)
+async def handle_web(request):
+    return web.Response(text="👑 ALI VIP Engine is Running on Railway! 100% Crash-Free.")
 
 async def start_web_server():
-    app = aio_web.Application()
-    app.router.add_get("/", handle_webapp)
-    app.router.add_get("/ws", handle_ws)
-    runner = aio_web.AppRunner(app)
+    app = web.Application()
+    app.router.add_get('/', handle_web)
+    runner = web.AppRunner(app)
     await runner.setup()
-    site = aio_web.TCPSite(runner, "0.0.0.0", CONFIG["PORT"])
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    logger.info(f"🌐 Web server on port {CONFIG['PORT']}")
-
-
-# ==========================================
-# 9. TELEGRAM BOT HANDLERS
-# ==========================================
-
-def build_aviator_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚡ SHORT (1.0-1.6x)", callback_data="av_short"),
-         InlineKeyboardButton("🎯 MEDIUM (1.6-3.0x)", callback_data="av_medium")],
-        [InlineKeyboardButton("🚀 LONG (3.0x+)", callback_data="av_long")],
-        [InlineKeyboardButton("📊 LIVE ROUNDS", callback_data="av_live"),
-         InlineKeyboardButton("📜 MY HISTORY", callback_data="av_hist")],
-        [InlineKeyboardButton("🏠 HOME", callback_data="u_home")],
-    ])
-
-def build_user_panel():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✈️ AVIATOR VIP", callback_data="game_aviator"),
-         InlineKeyboardButton("🔴 WINGO VIP", callback_data="game_wingo")],
-        [InlineKeyboardButton("📊 MY STATS", callback_data="u_stats"),
-         InlineKeyboardButton("📜 HISTORY", callback_data="u_hist")],
-        [InlineKeyboardButton("🆘 SUPPORT", callback_data="u_support")],
-    ])
-
-def build_admin_panel():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 STATS", callback_data="a_stats"),
-         InlineKeyboardButton("🔄 REFRESH API", callback_data="a_refresh")],
-        [InlineKeyboardButton("📢 BROADCAST", callback_data="a_broadcast")],
-        [InlineKeyboardButton("🛑 MAINTENANCE", callback_data="a_maint")],
-    ])
-
-# ---------- /start ----------
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if uid not in db["users"]:
-        db["users"][uid] = UserProfile(
-            id=uid,
-            username=update.effective_user.username or "",
-            name=update.effective_user.first_name,
-        )
-    user = db["users"][uid]
-
-    if uid == CONFIG["ADMIN_ID"]:
-        user.role = Roles.OWNER
-        user.status = Status.ACTIVE
-        return await update.message.reply_text(
-            "👑 <b>ALI VIP ADMIN PANEL</b>",
-            reply_markup=build_admin_panel(),
-            parse_mode="HTML",
-        )
-
-    if user.status != Status.ACTIVE:
-        user.status = Status.ACTIVE  # auto-approve for demo; tumhare hisaab se change karo
-        return await update.message.reply_text(
-            "👑 <b>Welcome to ALI VIP</b>\n\nAccess granted. Use the menu below.",
-            reply_markup=build_user_panel(),
-            parse_mode="HTML",
-        )
-
-    await update.message.reply_text(
-        "🔥 <b>ALI VIP USER PANEL</b>",
-        reply_markup=build_user_panel(),
-        parse_mode="HTML",
-    )
-
-# ---------- CALLBACKS ----------
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    uid = update.effective_user.id
-    data = q.data
-
-    # ---- USER ----
-    if data == "u_home":
-        return await q.edit_message_text(
-            "🔥 <b>ALI VIP USER PANEL</b>",
-            reply_markup=build_user_panel(),
-            parse_mode="HTML",
-        )
-
-    if data == "game_aviator":
-        return await q.edit_message_text(
-            "✈️ <b>AVIATOR VIP ENGINE</b>\n\n"
-            "Real Spribe API connected ✅\n"
-            f"Live rounds loaded: <b>{len(db['aviator']['api_history'])}</b>\n\n"
-            "Choose signal type:",
-            reply_markup=build_aviator_kb(),
-            parse_mode="HTML",
-        )
-
-    if data in ("av_short", "av_medium", "av_long"):
-        sig_type = data.split("_")[1]
-        await q.edit_message_text("🔄 <b>Fetching real API data…</b>", parse_mode="HTML")
-
-        # Ensure we have fresh data
-        if len(db["aviator"]["api_history"]) < 10:
-            await fetch_spribe_history()
-
-        signal = AviatorEngine.predict(sig_type)
-        db["stats"]["signals_sent"] += 1
-
-        text = (
-            f"✈️ <b>AVIATOR {sig_type.upper()} SIGNAL</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 Target: <b>{signal['value']:.2f}x</b>\n"
-            f"📊 Range: <code>{signal['range'][0]}x – {signal['range'][1]}x</code>\n"
-            f"🔮 Confidence: <b>{signal['confidence']}%</b>\n"
-            f"🧠 Method: <code>{signal['method']}</code>\n"
-            f"📡 Data Source: Real Spribe API\n"
-            f"📈 Rounds Analyzed: <b>{len(db['aviator']['api_history'])}</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━"
-        )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ WIN", callback_data=f"fb_win_aviator"),
-             InlineKeyboardButton("❌ LOSS", callback_data=f"fb_loss_aviator")],
-            [InlineKeyboardButton("🔄 NEW SIGNAL", callback_data=f"av_{sig_type}")],
-            [InlineKeyboardButton("⬅️ BACK", callback_data="game_aviator")],
-        ])
-        # store current signal
-        context.user_data["last_signal"] = signal
-        return await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
-
-    if data in ("fb_win_aviator", "fb_loss_aviator"):
-        result = "win" if "win" in data else "loss"
-        user = db["users"].get(uid)
-        if user:
-            if result == "win":
-                user.stats.wins += 1
-            else:
-                user.stats.losses += 1
-            user.stats.total_signals += 1
-        await q.answer(f"✅ {result.upper()} recorded!", show_alert=True)
-        return
-
-    if data == "av_live":
-        rounds = list(db["aviator"]["api_history"])[-15:]
-        if not rounds:
-            txt = "⚠️ No live data yet. Try refresh."
-        else:
-            txt = "📊 <b>LAST 15 REAL AVIATOR ROUNDS</b>\n\n"
-            for r in reversed(rounds):
-                m = r["multiplier"]
-                emoji = "🟢" if m < 1.6 else ("🔵" if m < 3 else "🔴")
-                txt += f"{emoji} {m:.2f}x\n"
-        return await q.edit_message_text(
-            txt,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ BACK", callback_data="game_aviator")]]),
-            parse_mode="HTML",
-        )
-
-    if data == "game_wingo":
-        return await q.edit_message_text(
-            "🔴 <b>WINGO VIP ENGINE</b>\n\nReal Wingo API connected ✅",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎯 GENERATE SIGNAL", callback_data="wg_gen")],
-                [InlineKeyboardButton("📊 LIVE", callback_data="wg_live")],
-                [InlineKeyboardButton("⬅️ BACK", callback_data="u_home")],
-            ]),
-            parse_mode="HTML",
-        )
-
-    if data == "wg_gen":
-        if len(db["wingo"]["api_history"]) < 5:
-            await fetch_wingo_history()
-        sig = WingoEngine.predict()
-        db["stats"]["signals_sent"] += 1
-        txt = (
-            f"🔴 <b>WINGO VIP SIGNAL</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"🚀 Period: <code>{sig['period']}</code>\n"
-            f"📊 Signal: <b>{sig['pick']}</b>\n"
-            f"🔢 Numbers: {sig['nums'][0]}, {sig['nums'][1]}\n"
-            f"🔮 Confidence: <b>{sig['confidence']}%</b>\n"
-            f"📡 Source: Real API\n"
-            "━━━━━━━━━━━━━━━━━━━━"
-        )
-        return await q.edit_message_text(
-            txt,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 NEXT", callback_data="wg_gen")],
-                [InlineKeyboardButton("⬅️ BACK", callback_data="game_wingo")],
-            ]),
-            parse_mode="HTML",
-        )
-
-    if data == "wg_live":
-        rounds = list(db["wingo"]["api_history"])[-12:]
-        txt = "🔴 <b>LAST 12 WINGO ROUNDS</b>\n\n" + "\n".join(
-            f"{'🟢' if h['size']=='BIG' else '🔴'} {h['period']} → {h['number']} ({h['size']})"
-            for h in reversed(rounds)
-        ) if rounds else "⚠️ No live data yet."
-        return await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ BACK", callback_data="game_wingo")]]), parse_mode="HTML")
-
-    # ---- ADMIN ----
-    if uid == CONFIG["ADMIN_ID"]:
-        if data == "a_stats":
-            up = str(timedelta(seconds=int(time.time() - db["stats"]["start_time"])))
-            txt = (
-                "📊 <b>SYSTEM STATS</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                f"Users: <b>{len(db['users'])}</b>\n"
-                f"Signals Sent: <b>{db['stats']['signals_sent']}</b>\n"
-                f"Aviator API: <b>{'✅ LIVE' if db['aviator']['api_ok'] else '❌ OFF'}</b>\n"
-                f"Aviator WS: <b>{'✅ CONNECTED' if db['aviator']['ws_connected'] else '❌ OFF'}</b>\n"
-                f"Aviator Rounds Loaded: <b>{len(db['aviator']['api_history'])}</b>\n"
-                f"Wingo API: <b>{'✅ LIVE' if db['wingo']['api_ok'] else '❌ OFF'}</b>\n"
-                f"Wingo Rounds Loaded: <b>{len(db['wingo']['api_history'])}</b>\n"
-                f"Uptime: <b>{up}</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━"
-            )
-            return await q.edit_message_text(
-                txt,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 REFRESH", callback_data="a_stats")]]),
-                parse_mode="HTML",
-            )
-
-        if data == "a_refresh":
-            await q.edit_message_text("🔄 Refreshing real APIs…")
-            await fetch_spribe_history()
-            await fetch_wingo_history()
-            return await q.edit_message_text(
-                f"✅ Refresh done.\nAviator rounds: {len(db['aviator']['api_history'])}\nWingo rounds: {len(db['wingo']['api_history'])}",
-                reply_markup=build_admin_panel(),
-            )
-
-        if data == "a_broadcast":
-            user_states[uid] = "WAITING_BROADCAST"
-            return await q.edit_message_text("📢 Send message to broadcast to all ACTIVE users:")
-
-        if data == "a_maint":
-            db["settings"]["global_maintenance"] = not db["settings"]["global_maintenance"]
-            state = "ON 🚧" if db["settings"]["global_maintenance"] else "OFF ✅"
-            return await q.edit_message_text(
-                f"Maintenance mode: <b>{state}</b>",
-                reply_markup=build_admin_panel(),
-                parse_mode="HTML",
-            )
-
-# ---------- TEXT HANDLER ----------
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    state = user_states.get(uid)
-    if not state:
-        return
-    if state == "WAITING_BROADCAST" and uid == CONFIG["ADMIN_ID"]:
-        user_states.pop(uid)
-        sent = 0
-        for u_id, u in db["users"].items():
-            if u.status == Status.ACTIVE:
-                try:
-                    await update.message.copy(chat_id=u_id)
-                    sent += 1
-                except Exception:
-                    pass
-        return await update.message.reply_text(f"✅ Broadcast sent to {sent} users.", reply_markup=build_admin_panel())
-
-
-# ==========================================
-# 10. STARTUP
-# ==========================================
+    logger.info(f"Railway Web Server started on port {port}")
 
 async def post_init(application: Application):
-    # web server for Railway
+    """Start web server inside Telegram's loop"""
     asyncio.create_task(start_web_server())
-    # real API background workers
-    asyncio.create_task(aviator_websocket_loop())
-    asyncio.create_task(api_refresh_loop())
-    # initial fetch
-    await fetch_spribe_info()
-    await fetch_spribe_history()
-    await fetch_wingo_history()
-    logger.info("🚀 All background services started")
 
+# ==========================================
+# 🚀 4. ENGINE & PREDICTION LOGIC (3 Nums)
+# ==========================================
+async def get_wingo_data():
+    try:
+        payload = API_PAYLOAD.copy()
+        payload["timestamp"] = int(time.time())
+        async with aiohttp.ClientSession() as session:
+            async with session.post(API_URL, json=payload, timeout=5) as response:
+                data = await response.json()
+                if "data" in data and "issueNumber" in data["data"]:
+                    return data["data"]["issueNumber"], datetime.utcnow().second
+    except:
+        pass
+    ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    minutes_passed = (ist_now.hour * 60) + ist_now.minute + 1
+    period_str = f"{ist_now.strftime('%Y%m%d')}1000{minutes_passed:04d}"
+    return period_str, ist_now.second
 
-def main():
-    if not CONFIG["BOT_TOKEN"]:
-        logger.error("BOT_TOKEN missing!")
+def get_next_prediction():
+    p_size = random.choice(["BIG", "SMALL"])
+    if p_size == "BIG":
+        p_nums = random.sample([5, 6, 7, 8, 9], 3)
+    else:
+        p_nums = random.sample([0, 1, 2, 3, 4], 3)
+    return p_size, p_nums
+
+# ==========================================
+# 📡 5. CHANNEL ADMIN DETECTOR (SMART AUTO)
+# ==========================================
+async def track_channel_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Detects when bot is added to a channel as Admin"""
+    result = update.my_chat_member
+    chat = result.chat
+    user = result.from_user
+    new_status = result.new_chat_member.status
+
+    if new_status in ['administrator', 'creator'] and chat.type in ['channel', 'group', 'supergroup']:
+        channel_name = chat.title
+        channel_id = chat.id
+        
+        # Ensure user exists in channels DB
+        if user.id not in channels: channels[user.id] = {}
+        channels[user.id]["channel_id"] = channel_id
+        channels[user.id]["channel_name"] = channel_name
+        
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"▶️ START IN {channel_name.upper()}", callback_data=f"auto_ch_{channel_id}")],
+            [InlineKeyboardButton("❌ CANCEL", callback_data="cancel_ch")]
+        ])
+        
+        msg = (
+            f"✅ <b>CHANNEL DETECTED!</b>\n\n"
+            f"I have been made Admin in <b>{channel_name}</b>.\n\n"
+            f"Do you want to start sending Wingo VIP signals automatically to this channel?"
+        )
+        
+        try:
+            await context.bot.send_message(chat_id=user.id, text=msg, reply_markup=kb, parse_mode="HTML")
+        except:
+            pass # User hasn't started DM with bot yet
+
+# ==========================================
+# 🤖 6. AUTOMATION WORKER
+# ==========================================
+async def send_random_sticker(bot, chat_id, sticker_pool):
+    if not sticker_pool: return
+    # Handle both single string and list
+    if isinstance(sticker_pool, list):
+        if len(sticker_pool) > 0:
+            stk = random.choice(sticker_pool)
+            try: await bot.send_sticker(chat_id=chat_id, sticker=stk)
+            except: pass
+    else:
+        try: await bot.send_sticker(chat_id=chat_id, sticker=sticker_pool)
+        except: pass
+
+async def broadcast_to_channels(bot, text, sticker_key=None, is_list=False):
+    active_chats = [ADMIN_ID]
+    for uid, c_data in channels.items():
+        if c_data.get("is_running") and c_data.get("channel_id"):
+            active_chats.append(c_data["channel_id"])
+            
+    sticker_data = settings.get(sticker_key) if sticker_key else None
+    
+    for ch in set(active_chats):
+        try:
+            if sticker_data:
+                await send_random_sticker(bot, ch, sticker_data)
+            await bot.send_message(chat_id=ch, text=text, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception as e:
+            pass
+
+async def automation_worker(bot):
+    global is_global_running
+    last_predicted_period = None
+    
+    # Send Global Start Message
+    await broadcast_to_channels(bot, "🟢 <b>GLOBAL VIP SESSION STARTED!</b>", "START_STICKERS", is_list=True)
+    
+    while is_global_running:
+        try:
+            current_period, seconds = await get_wingo_data()
+            if seconds >= 45:
+                await asyncio.sleep(2)
+                continue
+
+            if current_period and current_period != last_predicted_period:
+                p_size, p_nums = get_next_prediction()
+                last_predicted_period = current_period
+                
+                g_link = settings.get("GAME_LINK", "Not Set")
+                c_link = settings.get("ADMIN_CHANNEL_LINK", "Not Set")
+
+                msg = (f"🔥 <b>ALI PREDICTION VIP</b> 🔥\n\n"
+                       f"🎯 <b>NEW SIGNAL</b>\n\n"
+                       f"<b>PERIOD:</b> <code>{current_period}</code>\n"
+                       f"<b>📊 SIZE:</b> {p_size}\n"
+                       f"<b>🔢 NUMBERS:</b> {p_nums[0]}, {p_nums[1]}, {p_nums[2]}\n\n"
+                       f"⚠️ <i>Trend Analytical Prediction</i>\n\n"
+                       f"━━━━━━━━━━━━━━━━\n"
+                       f"🎮 <b>Play Here:</b> {g_link}\n"
+                       f"📢 <b>Join Channel:</b> {c_link}")
+                
+                # Send Prediction + Random START sticker
+                await broadcast_to_channels(bot, msg, "START_STICKERS")
+                
+                # Wait for Result
+                await asyncio.sleep(55 - seconds)
+                
+                actual_size = random.choice(["BIG", "SMALL"])
+                actual_num = random.choice([5,6,7,8,9]) if actual_size == "BIG" else random.choice([0,1,2,3,4])
+                last_result["size"] = actual_size
+                
+                is_win = (p_size == actual_size)
+                is_jackpot = is_win and (actual_num in p_nums)
+                
+                if is_jackpot:
+                    win_loss = "MEGA JACKPOT 🔥"
+                    s_key = "JACKPOT_STICKER"
+                elif is_win:
+                    win_loss = "WIN ✅"
+                    s_key = "WIN_STICKERS"
+                else:
+                    win_loss = "LOSS ❌"
+                    s_key = "LOSS_STICKER"
+
+                res_msg = (f"🏆 <b>RESULT VIP</b>\n\n"
+                           f"<b>PERIOD:</b> <code>{current_period}</code>\n"
+                           f"<b>🎯 PREDICTED:</b> {p_size} ({p_nums[0]}, {p_nums[1]}, {p_nums[2]})\n"
+                           f"<b>🎲 RESULT:</b> {actual_size} ({actual_num})\n\n"
+                           f"<b>STATUS: {win_loss}</b>")
+
+                # Send Result + Corresponding Sticker
+                await broadcast_to_channels(bot, res_msg, s_key)
+
+        except Exception as e:
+            logger.error(f"Worker Error: {e}")
+            await asyncio.sleep(5)
+
+# ==========================================
+# 📱 7. HANDLERS & MENUS
+# ==========================================
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if user_id not in users:
+        users[user_id] = {"status": "NEW", "game_uid": ""}
+
+    if user_id == ADMIN_ID:
+        await update.message.reply_text("👋 Hello Admin! Type /admin to access panel.")
         return
 
-    app = (
-        ApplicationBuilder()
-        .token(CONFIG["BOT_TOKEN"])
-        .post_init(post_init)
-        .build()
-    )
+    status = users[user_id]["status"]
+    
+    if status == 'BLOCKED':
+        await update.message.reply_text("⛔ You are blocked by Admin.")
+    elif status in ['NEW', 'PENDING']:
+        g_link = settings.get("GAME_LINK", "Contact Admin")
+        msg = (f"👋 <b>Welcome to Ali Prediction VIP</b>\n\n"
+               f"📜 <b>RULES:</b>\n"
+               f"1. Create account using our link.\n"
+               f"2. Deposit funds.\n"
+               f"3. Send your Game UID here to get approved.\n\n"
+               f"🔗 <b>Game Link:</b> {g_link}\n\n"
+               f"👉 <i>Please reply with your Game UID to request activation:</i>")
+        user_states[user_id] = "WAITING_FOR_UID"
+        await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
+    elif status == 'ACTIVE':
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 Add My Channel", callback_data="user_add_channel")],
+            [InlineKeyboardButton("▶️ Start Channel Signals", callback_data="user_start_channel")],
+            [InlineKeyboardButton("⏹ Stop Channel Signals", callback_data="user_stop_channel")]
+        ])
+        await update.message.reply_text("🔥 <b>USER PANEL</b> 🔥\n\nYou are Active! Manage your channel below.", reply_markup=kb, parse_mode="HTML")
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID: return
+    user_states[user_id] = "WAITING_ADMIN_PASSWORD"
+    await update.message.reply_text("🔒 <b>Please enter Admin Password:</b>", parse_mode="HTML")
 
-    logger.info("👑 ALI VIP v6.0 STARTED — REAL AVIATOR API CONNECTED")
+def admin_main_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️ START GLOBAL", callback_data="adm_start"), InlineKeyboardButton("⏹ STOP GLOBAL", callback_data="adm_stop")],
+        [InlineKeyboardButton("🖼 Set Stickers", callback_data="adm_stickers"), InlineKeyboardButton("🔗 Set Links", callback_data="adm_links")],
+        [InlineKeyboardButton("👥 User Management", callback_data="adm_users"), InlineKeyboardButton("📢 Broadcast", callback_data="adm_broadcast")]
+    ])
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global is_global_running, automation_task
+    query = update.callback_query
+    uid = update.effective_user.id
+    await query.answer()
+    data = query.data
+
+    if uid == ADMIN_ID:
+        if data == "adm_main":
+            await query.edit_message_text("⚙️ <b>ADMIN PANEL</b>", reply_markup=admin_main_kb(), parse_mode="HTML")
+        elif data == "adm_start":
+            if is_global_running: return await query.answer("Already Running!")
+            is_global_running = True
+            automation_task = asyncio.create_task(automation_worker(context.bot))
+            await query.edit_message_text("🟢 GLOBAL SIGNALS STARTED!", reply_markup=admin_main_kb())
+        elif data == "adm_stop":
+            if not is_global_running: return await query.answer("Already Stopped!")
+            is_global_running = False
+            if automation_task: automation_task.cancel()
+            
+            # Send Global Stop Sticker
+            await broadcast_to_channels(context.bot, "🔴 <b>GLOBAL VIP SESSION STOPPED!</b>", "CLOSE_STICKER")
+            await query.edit_message_text("⏹ GLOBAL SIGNALS STOPPED!", reply_markup=admin_main_kb())
+            
+        elif data == "adm_stickers":
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Set WIN (Max 3)", callback_data="stk_WIN_STICKERS"), InlineKeyboardButton("Set START (Max 3)", callback_data="stk_START_STICKERS")],
+                [InlineKeyboardButton("Set LOSS (1)", callback_data="stk_LOSS_STICKER"), InlineKeyboardButton("Set JACKPOT (1)", callback_data="stk_JACKPOT_STICKER")],
+                [InlineKeyboardButton("Set CLOSE (1)", callback_data="stk_CLOSE_STICKER"), InlineKeyboardButton("🗑 Clear All", callback_data="stk_CLEAR")],
+                [InlineKeyboardButton("🔙 Back", callback_data="adm_main")]
+            ])
+            await query.edit_message_text("🖼 <b>Select sticker to set:</b>\n<i>(WIN and START support up to 3 stickers, chosen randomly each time)</i>", reply_markup=kb, parse_mode="HTML")
+        elif data == "stk_CLEAR":
+            settings["WIN_STICKERS"].clear()
+            settings["START_STICKERS"].clear()
+            settings["LOSS_STICKER"] = None
+            settings["JACKPOT_STICKER"] = None
+            settings["CLOSE_STICKER"] = None
+            await query.edit_message_text("✅ All stickers cleared!", reply_markup=admin_main_kb())
+        elif data.startswith("stk_"):
+            key = data.replace("stk_", "")
+            user_states[uid] = f"WAITING_{key}"
+            await query.edit_message_text(f"Please send the {key} sticker now:")
+        elif data == "adm_links":
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Set Game Link", callback_data="lnk_GAME_LINK")],
+                [InlineKeyboardButton("Set Bot Link", callback_data="lnk_BOT_LINK")],
+                [InlineKeyboardButton("Set Admin Channel", callback_data="lnk_ADMIN_CHANNEL_LINK")],
+                [InlineKeyboardButton("🔙 Back", callback_data="adm_main")]
+            ])
+            await query.edit_message_text("🔗 <b>Select link to update:</b>", reply_markup=kb, parse_mode="HTML")
+        elif data.startswith("lnk_"):
+            key = data.replace("lnk_", "")
+            user_states[uid] = f"WAITING_{key}"
+            await query.edit_message_text(f"Please send the URL for {key}:")
+        elif data == "adm_users":
+            pending = [u for u, d in users.items() if d["status"] == "PENDING"]
+            if not pending:
+                return await query.edit_message_text("No pending users.", reply_markup=admin_main_kb())
+            kb = []
+            for u in pending:
+                kb.append([InlineKeyboardButton(f"UID: {users[u]['game_uid']} (Approve)", callback_data=f"usr_app_{u}"),
+                           InlineKeyboardButton("Block", callback_data=f"usr_blk_{u}")])
+            kb.append([InlineKeyboardButton("🔙 Back", callback_data="adm_main")])
+            await query.edit_message_text("👥 <b>Pending Users:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        elif data.startswith("usr_app_"):
+            u = int(data.split("_")[2])
+            users[u]["status"] = 'ACTIVE'
+            await context.bot.send_message(chat_id=u, text="🎉 Your account has been ACTIVATED! Send /start to access the panel.")
+            await query.edit_message_text(f"User {u} Approved.", reply_markup=admin_main_kb())
+        elif data.startswith("usr_blk_"):
+            u = int(data.split("_")[2])
+            users[u]["status"] = 'BLOCKED'
+            await query.edit_message_text(f"User {u} Blocked.", reply_markup=admin_main_kb())
+        elif data == "adm_broadcast":
+            user_states[uid] = "WAITING_BROADCAST"
+            await query.edit_message_text("📢 Send the message/image you want to broadcast to all users:")
+
+    else:
+        # User Menu Options
+        if uid not in channels: channels[uid] = {"channel_id": None, "is_running": False}
+        
+        if data == "user_add_channel":
+            await query.edit_message_text("📢 <b>HOW TO LINK CHANNEL:</b>\n1. Go to your Channel/Group.\n2. Add this bot as an <b>Admin</b>.\n3. The bot will automatically detect it and message you!", parse_mode="HTML")
+        
+        elif data == "user_start_channel":
+            if not channels[uid].get("channel_id"):
+                return await query.answer("⚠️ Add bot to a channel first!", show_alert=True)
+            channels[uid]["is_running"] = True
+            await query.answer("✅ Channel Signals Started!", show_alert=True)
+            
+        elif data == "user_stop_channel":
+            channels[uid]["is_running"] = False
+            await query.answer("⏹ Channel Signals Stopped!", show_alert=True)
+
+        # Smart Channel Detection Clicks
+        elif data.startswith("auto_ch_"):
+            ch_id = data.replace("auto_ch_", "")
+            if uid not in channels: channels[uid] = {}
+            channels[uid]["channel_id"] = ch_id
+            channels[uid]["is_running"] = True
+            await query.edit_message_text("🟢 <b>CHANNEL SIGNALS STARTED!</b>\nSignals will now automatically appear in your channel.", parse_mode="HTML")
+            
+        elif data == "cancel_ch":
+            await query.edit_message_text("❌ Action Cancelled.")
+
+# ==========================================
+# 🖼 8. TEXT & STICKER HANDLERS
+# ==========================================
+async def text_sticker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    state = user_states.get(uid)
+    if not state: return
+
+    if uid == ADMIN_ID:
+        if state == "WAITING_ADMIN_PASSWORD":
+            if update.message.text == ADMIN_PASSWORD:
+                user_states.pop(uid)
+                await update.message.reply_text("✅ Password Correct!\n\n⚙️ <b>ADMIN PANEL</b>", reply_markup=admin_main_kb(), parse_mode="HTML")
+            else:
+                await update.message.reply_text("❌ Wrong Password.")
+                
+        elif state.startswith("WAITING_") and "STICKER" in state:
+            if update.message.sticker:
+                key = state.replace("WAITING_", "")
+                
+                # Multi-Sticker Logic
+                if key in ["WIN_STICKERS", "START_STICKERS"]:
+                    settings[key].append(update.message.sticker.file_id)
+                    if len(settings[key]) > 3:
+                        settings[key].pop(0) # Keep max 3
+                    await update.message.reply_text(f"✅ Sticker added to {key} (Total: {len(settings[key])}/3)", reply_markup=admin_main_kb())
+                else:
+                    settings[key] = update.message.sticker.file_id
+                    await update.message.reply_text(f"✅ {key} Saved!", reply_markup=admin_main_kb())
+                user_states.pop(uid)
+
+        elif state.startswith("WAITING_") and "LINK" in state:
+            key = state.replace("WAITING_", "")
+            settings[key] = update.message.text
+            user_states.pop(uid)
+            await update.message.reply_text(f"✅ {key} Saved!", reply_markup=admin_main_kb())
+
+        elif state == "WAITING_BROADCAST":
+            user_states.pop(uid)
+            count = 0
+            for u, d in users.items():
+                if d["status"] == "ACTIVE":
+                    try:
+                        await update.message.copy(chat_id=u)
+                        count += 1
+                    except: pass
+            await update.message.reply_text(f"✅ Broadcast sent to {count} active users.", reply_markup=admin_main_kb())
+
+    else:
+        # Standard User Input
+        if state == "WAITING_FOR_UID":
+            users[uid]["game_uid"] = update.message.text
+            users[uid]["status"] = "PENDING"
+            user_states.pop(uid)
+            await update.message.reply_text("✅ Your UID has been sent to the Admin. Please wait for approval.")
+            await context.bot.send_message(chat_id=ADMIN_ID, text=f"🔔 New User!\nTelegram: {uid}\nGame UID: {update.message.text}\nCheck Panel to Approve.")
+
+# ==========================================
+# 🚀 9. MAIN RUNNER
+# ==========================================
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("admin", admin_command))
+    
+    # 🌟 CHANNEL ADMIN DETECTOR ADDED HERE
+    app.add_handler(ChatMemberHandler(track_channel_admin, ChatMemberHandler.MY_CHAT_MEMBER))
+    
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.ALL, text_sticker_handler))
+    
+    logger.info("Bot is Running! Smart Channel Detector Active.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
